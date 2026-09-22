@@ -1,0 +1,17 @@
+node_modules/
+
+# logs
+*.log
+
+# dev scratch scripts
+scripts/_agtest*.cjs
+scripts/_debug.sh
+scripts/_detach.sh
+
+# OS
+.DS_Store
+Thumbs.db
+
+# electron
+out/
+dist/
