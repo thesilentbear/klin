@@ -1,6 +1,6 @@
 {
   "name": "klin",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Klin — private local AI chat on your own llama.cpp server with web research, YouTube tools, image paste, and compaction",
   "main": "electron/main.js",
   "scripts": {

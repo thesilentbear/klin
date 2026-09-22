@@ -55,11 +55,21 @@
       <label>llama.cpp URL
         <input type="text" id="set-llama" />
       </label>
+      <label>Provider
+        <select id="set-provider">
+          <option value="auto">Auto (local llama.cpp, fallback to OpenCode Zen)</option>
+          <option value="local">Local llama.cpp only</option>
+          <option value="zen">OpenCode Zen (free cloud models)</option>
+        </select>
+      </label>
+      <label>Model
+        <select id="set-model"></select>
+      </label>
+      <label>Zen API key (empty = free tier)
+        <input type="password" id="set-zenkey" placeholder="sk-…" autocomplete="off" />
+      </label>
       <label>SearXNG URL
         <input type="text" id="set-searxng" />
-      </label>
-      <label>Model ID (empty = first on server)
-        <input type="text" id="set-model" />
       </label>
       <label>Temperature
         <input type="number" id="set-temp" step="0.1" min="0" max="2" />

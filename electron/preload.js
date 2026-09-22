@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('api', {
   settingsGet: () => ipcRenderer.invoke('settings:get'),
   settingsSet: (patch) => ipcRenderer.invoke('settings:set', patch),
   probe: () => ipcRenderer.invoke('probe'),
+  zenModels: () => ipcRenderer.invoke('zen:models'),
   search: (q) => ipcRenderer.invoke('search', q),
   youtube: (url) => ipcRenderer.invoke('youtube', url),
   countTokens: (text) => ipcRenderer.invoke('count-tokens', text),

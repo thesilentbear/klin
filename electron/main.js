@@ -77,7 +77,7 @@ function sendTheme() {
   if (win && !win.isDestroyed()) win.webContents.send('theme:changed', systemTheme());
 }
 
-const { chatStream } = require('../lib/llama');
+const { chatStream, fetchZenModels, ZEN_BASE } = require('../lib/llama');
 const { runAgent } = require('../lib/agent');
 const { search } = require('../lib/search');
 const { getVideoData } = require('../lib/youtube');
@@ -95,7 +95,10 @@ let settings = null;
 const DEFAULTS = {
   llamaUrl: 'http://127.0.0.1:8080',
   searxngUrl: 'http://127.0.0.1:8888',
+  provider: 'local', // default to the local llama.cpp server; Zen only if explicitly chosen
   model: '',
+  zenModel: '',
+  zenApiKey: '',
   temp: 0.7,
   maxTokens: 4096,
   compactNudge: 0.75,
@@ -103,6 +106,15 @@ const DEFAULTS = {
   researchResults: 5,
   searchBackend: 'ddg',
 };
+
+// Which free Zen models are enabled by default. deepseek-v4-flash-free is
+// confirmed to pass the gateway auth check (it returns "Model is unavailable"
+// on the gateway side rather than a 403 FreeTierError, i.e. it reaches the
+// upstream router). Others are advertised free but gated.
+// Anonymous free Zen model. big-pickle passes OpenCode's free-tier gate
+// reliably (returns a real 200 stream). deepseek-free variants are gated /
+// transiently "Model is unavailable", so big-pickle is the safe default.
+const PREFERRED_ZEN = 'big-pickle';
 
 function loadSettings() {
   let saved = {};
@@ -189,20 +201,36 @@ try {
   });
 } catch (e) { /* no fontconfig dir */ }
 
+ipcMain.handle('zen:models', async () => {
+  try {
+    const ids = await fetchZenModels();
+    const free = ids.filter(id => /-free$/i.test(id) || /^big-pickle/i.test(id));
+    return { ok: true, models: ids, free };
+  } catch (e) {
+    return { ok: false, models: [], free: [] };
+  }
+});
+
 ipcMain.handle('probe', async () => {
-  const out = { llama: false, searxng: false, model: '', capabilities: [] };
+  const out = { llama: false, searxng: false, zen: false, model: '', capabilities: [], llamaModels: [], zenFree: [] };
   try {
     const r = await fetch(settings.llamaUrl + '/v1/models', { signal: AbortSignal.timeout(4000) });
     if (r.ok) {
       const j = await r.json();
       out.llama = true;
       const list = (j.data || []).filter(m => m.id);
+      out.llamaModels = list.map(m => m.id);
       if (list.length) {
         out.model = settings.model || list[0].id;
         out.capabilities = list[0].capabilities || [];
       }
     }
   } catch (e) { /* offline */ }
+  try {
+    const ids = await fetchZenModels();
+    out.zen = true;
+    out.zenFree = ids.filter(id => /-free$/i.test(id) || /^big-pickle/i.test(id));
+  } catch (e) { /* gateway unreachable */ }
   try {
     const r = await fetch(settings.searxngUrl + '/', { signal: AbortSignal.timeout(4000) });
     out.searxng = r.ok;
@@ -218,24 +246,41 @@ ipcMain.on('chat:start', (e, { id, payload: messages }) => {
   const emit = (ev, payload) => {
     if (win && !win.isDestroyed()) win.webContents.send(ev, id, payload);
   };
-  runAgent({
-    url: settings.llamaUrl,
-    model: settings.model,
-    messages,
-    temp: settings.temp,
-    maxTokens: settings.maxTokens,
-    settings,
-    signal: controller.signal,
-    onReasoning: t => emit('chat:reasoning', t),
-    onChunk: t => emit('chat:chunk', t),
-    onTool: t => emit('chat:tool', t),
-    onDone: (d) => {
-      controllers.delete(id);
-      emit('chat:done', d);
-    },
+  // Resolve which backend to use. 'auto' prefers local llama.cpp and falls
+  // back to OpenCode Zen free chat models when the local server is offline.
+  const wantZen = async () => {
+    if (settings.provider === 'local') return false;
+    if (settings.provider === 'zen') return true;
+    try {
+      const r = await fetch(settings.llamaUrl + '/v1/models', { signal: AbortSignal.timeout(1500) });
+      return !r.ok;
+    } catch (e) { return true; }
+  };
+  wantZen().then(zen => {
+    const model = zen ? settings.zenModel || PREFERRED_ZEN : settings.model || 'default';
+    return runAgent({
+      url: settings.llamaUrl,
+      model,
+      messages,
+      temp: settings.temp,
+      maxTokens: settings.maxTokens,
+      settings,
+      signal: controller.signal,
+      zen,
+      zenApiKey: settings.zenApiKey || '',
+      onReasoning: t => emit('chat:reasoning', t),
+      onChunk: t => emit('chat:chunk', t),
+      onTool: t => emit('chat:tool', t),
+      onDone: (d) => {
+        controllers.delete(id);
+        emit('chat:done', d);
+      },
+    });
+  }).then(d => {
+    if (d) { controllers.delete(id); emit('chat:done', d); }
   }).catch(err => {
     controllers.delete(id);
-    emit('chat:done', { error: String((err && err.message) || err), partial: controllers.get(id)?.partial });
+    emit('chat:done', { error: String((err && err.message) || err) });
   });
 });
 

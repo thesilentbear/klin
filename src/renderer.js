@@ -14,6 +14,8 @@ let attachments = [];
 let ctxTotal = 0;
 let compactHandled = false;
 let lastScroll = 0;
+let zenFreeIds = [];              // free Zen model ids (from probe / zen:models)
+let zenAllIds = [];               // full Zen catalogue (free + paid)
 
 /* ---------- init ---------- */
 
@@ -111,14 +113,14 @@ function mixAccent(hex) {
 
 (async function init() {
   settings = await api.settingsGet();
-  $('model-name').textContent = short(settings.model || (settings.llamaUrl || ''));
-  fillSettingsForm();
-  bindEvents();
+  bindEvents();               // wire ALL buttons first — never block the UI on probes
+  $('model-name').textContent = short((settings.provider === 'zen' ? settings.zenModel : settings.model) || (settings.llamaUrl || ''));
   applyTheme(await api.themeGet());
   api.onThemeChange(applyTheme);
   await refreshSessions();
   await newChat();
-  probe();
+  void fillSettingsForm();    // non-blocking; probe/zen fills happen in the background
+  if (!(await probe())) ensureProbing();
 })();
 
 function bindEvents() {
@@ -156,10 +158,30 @@ async function probe() {
     dot.classList.add('ok');
     $('conn-text').textContent = 'connected';
     $('model-name').textContent = short(p.model || settings.model || '');
+  } else if (p.zen) {
+    dot.classList.add('ok');
+    $('conn-text').textContent = 'zen (cloud)';
+    $('model-name').textContent = short(currentZenModel());
   } else {
     dot.classList.add('err');
     $('conn-text').textContent = 'llama.cpp offline';
   }
+  return p.llama;
+}
+
+function currentZenModel() {
+  return settings.zenModel || (zenFreeIds.length ? zenFreeIds[0] : '');
+}
+
+let probeTimer = null;
+function ensureProbing() {
+  if (probeTimer) return;
+  probeTimer = setInterval(async () => {
+    if (await probe()) {
+      clearInterval(probeTimer);
+      probeTimer = null;
+    }
+  }, 4000);
 }
 
 function short(s) { return (s || '').split('/').pop(); }
@@ -313,6 +335,7 @@ async function send() {
   const inp = $('input');
   const text = inp.value.trim();
   if (!text && !attachments.length) return;
+  if ((await probe())) { if (probeTimer) { clearInterval(probeTimer); probeTimer = null; } }
   const images = attachments.map(a => a.dataUrl);
   inp.value = '';
   autosize();
@@ -763,22 +786,101 @@ function renderAttachments() {
 
 /* ---------- settings ---------- */
 
-function fillSettingsForm() {
+async function refreshZenModels() {
+  try {
+    const z = await api.zenModels();
+    if (z && z.ok) { zenFreeIds = z.free || []; zenAllIds = z.models || []; }
+  } catch (e) { /* gateway unreachable; keep last-known list */ }
+  return zenFreeIds;
+}
+
+function setModelSelect() {
+  const sel = $('set-model');
+  sel.innerHTML = '';
+  const provider = $('set-provider').value || 'auto';
+  if (provider === 'zen') {
+    // Zen catalogue: free models first, then paid (require an API key)
+    const ids = (zenAllIds.length ? zenAllIds : [...zenFreeIds]);
+    const freeSet = new Set(zenFreeIds);
+    const og = document.createElement('optgroup');
+    og.label = 'OpenCode Zen (free)';
+    for (const id of ids.filter(x => freeSet.has(x))) {
+      const o = document.createElement('option');
+      o.value = id; o.textContent = id; og.appendChild(o);
+    }
+    sel.appendChild(og);
+    const og2 = document.createElement('optgroup');
+    og2.label = 'OpenCode Zen (API key)';
+    for (const id of ids.filter(x => !freeSet.has(x))) {
+      const o = document.createElement('option');
+      o.value = id; o.textContent = id; og2.appendChild(o);
+    }
+    if (og2.options.length) sel.appendChild(og2);
+    const want = settings.zenModel || (zenFreeIds.length ? zenFreeIds[0] : '');
+    if (want && [...sel.options].some(o => o.value === want)) sel.value = want;
+    return;
+  }
+  // local or auto: llama models first, then free zen models
+  const local = settings.localModels || [];
+  const groups = [
+    local.length ? { label: 'Local llama.cpp', ids: local, zen: false } : null,
+    zenFreeIds.length ? { label: 'OpenCode Zen (free)', ids: zenFreeIds, zen: true } : null,
+  ].filter(Boolean);
+  if (!groups.length) {
+    const o = document.createElement('option');
+    o.value = '';
+    o.textContent = '(no models)';
+    sel.appendChild(o);
+    return;
+  }
+  for (const g of groups) {
+    const og = document.createElement('optgroup');
+    og.label = g.label;
+    for (const id of g.ids) {
+      const o = document.createElement('option');
+      o.value = id;
+      o.dataset.zen = g.zen;
+      o.textContent = id;
+      og.appendChild(o);
+    }
+    sel.appendChild(og);
+  }
+  const want = settings.zenModel || settings.model || (zenFreeIds.length ? zenFreeIds[0] : '');
+  if (want && [...sel.options].some(o => o.value === want)) sel.value = want;
+}
+
+async function fillSettingsForm() {
   $('set-llama').value = settings.llamaUrl || 'http://127.0.0.1:8080';
   $('set-searxng').value = settings.searxngUrl || 'http://127.0.0.1:8888';
-  $('set-model').value = settings.model || '';
+  $('set-provider').value = settings.provider || 'auto';
+  $('set-model').value = settings.zenModel || settings.model || '';
+  $('set-zenkey').value = settings.zenApiKey || '';
   $('set-temp').value = settings.temp ?? 0.7;
   $('set-nudge').value = Math.round((settings.compactNudge ?? 0.75) * 100);
   $('set-auto').value = Math.round((settings.compactAuto ?? 0.9) * 100);
   $('set-results').value = settings.researchResults ?? 5;
   $('set-backend').value = settings.searchBackend || 'ddg';
+  try {
+    const p = await api.probe();
+    settings.localModels = p.llamaModels || [];
+    if (p.zenFree && p.zenFree.length) zenFreeIds = p.zenFree;
+  } catch (e) { /* offline */ }
+  if (!zenFreeIds.length) await refreshZenModels();
+  else if (!zenAllIds.length) { try { const z = await api.zenModels(); if (z && z.ok) zenAllIds = z.models || []; } catch (e) {} }
+  setModelSelect();
 }
-function openSettings() { fillSettingsForm(); $('settings-modal').hidden = false; }
+async function openSettings() { $('settings-modal').hidden = false; void fillSettingsForm(); } // show IMMEDIATELY; probes/zen fills run in the background
 async function onSaveSettings() {
+  const provider = $('set-provider').value;
+  const chosen = $('set-model').value;
+  const settingZen = provider === 'zen' || zenFreeIds.includes(chosen);
   settings = await api.settingsSet({
     llamaUrl: $('set-llama').value.trim(),
     searxngUrl: $('set-searxng').value.trim(),
-    model: $('set-model').value.trim(),
+    provider,
+    model: settingZen ? settings.model : chosen,
+    zenModel: settingZen ? chosen : settings.zenModel,
+    zenApiKey: $('set-zenkey').value.trim(),
     temp: parseFloat($('set-temp').value),
     compactNudge: parseInt($('set-nudge').value) / 100,
     compactAuto: parseInt($('set-auto').value) / 100,
@@ -786,7 +888,7 @@ async function onSaveSettings() {
     searchBackend: $('set-backend').value,
   });
   $('settings-modal').hidden = true;
-  probe();
+  if (!(await probe())) ensureProbing();
   updateCtxMeter();
 }
 
